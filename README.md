@@ -202,7 +202,7 @@ development only.
 `requirePermission("charge:waive")` answers "may this request waive a charge?" —
 which is the question that survives a second role needing to do the same thing.
 
-`src/constants/permission.constants.ts` holds 25 permission strings and the
+`src/constants/permission.constants.ts` holds 24 permission strings and the
 role → permissions map. It is code rather than a table on purpose: nothing in the
 product lets an admin edit it, so a table would be a table of constants with a
 migration in front of it. As code, a typo is a compile error and the whole map is

@@ -40,7 +40,12 @@ const correlation = winston.format((info) => {
   return info;
 });
 
-/** Objects are logged as objects; `${}` would render them as "[object Object]". */
+/**
+ * A defensive no-op today: `colorize({ all: true })` runs before printf and has
+ * already inspected an object message into a string by the time this sees it.
+ * It exists for the day the format chain changes — drop colorize for JSON logs
+ * in production, and without this every object message becomes "[object Object]".
+ */
 const renderMessage = (message: unknown): string =>
   typeof message === "string" ? message : JSON.stringify(message);
 
