@@ -1,0 +1,163 @@
+# ---------------------------------------------------------------------------
+# RakeSetu backend — local infrastructure.
+#
+# Postgres, Redis and RabbitMQ. The API itself runs on the host via `npm run dev`,
+# which is the fast feedback loop; the `api` service below is opt-in for
+# testing the production image.
+#
+#   docker compose up -d postgres redis rabbitmq   # then set DB_PORT=55433 in .env
+#   docker compose --profile api up -d --build
+#
+# The four-replica + nginx layer from the College-Level compose is deliberately
+# not copied: it exists to benchmark load balancing, which RakeSetu has no need
+# for yet. Add it back when there is a load-balancing question to answer.
+#
+# The Postgres image is `pgvector/pgvector:pg16` rather than `postgres:16-alpine`
+# — same server version, plus the extension Phase 12's RAG corpus needs. Picking
+# it now means the test harness never has to be rebuilt against a different
+# image later. See docs/phases/DECISIONS.md D1.
+# ---------------------------------------------------------------------------
+
+name: rakesetu
+
+services:
+  postgres:
+    # pgvector/pgvector:pg16 IS postgres 16 — the extension is pre-installed but
+    # not enabled; `CREATE EXTENSION vector` is Phase 12's job. See DECISIONS D1.
+    image: pgvector/pgvector:pg16
+    container_name: rakesetu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-rakesetu}
+    ports:
+      # 55433 on the host: 5432 is a local Postgres install and 55432 is already
+      # taken by the College-Level project's Postgres, which is expected to run
+      # at the same time as this one.
+      - "55433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - rakesetu
+
+  redis:
+    image: redis:7-alpine
+    container_name: rakesetu-redis
+    restart: unless-stopped
+    ports:
+      # Nothing else on this machine binds 6379; keep the default so redis-cli
+      # and every client library work with no configuration.
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - rakesetu
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rakesetu-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      # Shifted off 5672/15672 so a RabbitMQ already running on the host does
+      # not collide — and off 5673/15673, which College-Level uses.
+      # Management UI: http://localhost:15674 (guest / guest).
+      - "5674:5672"
+      - "15674:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - rakesetu
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rakesetu-api:latest
+    container_name: rakesetu-api
+    profiles: ["api"]
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      # Infra lives on the compose network, not on the host.
+      DB_HOST: postgres
+      DB_PORT: 5432
+      # The sidecar Postgres does not terminate TLS, so keep SSL off even though
+      # NODE_ENV is production (managed Postgres in real prod sets DB_SSL=true).
+      DB_SSL: "false"
+      # The broker is on the compose network, on its internal port.
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672
+      USE_RABBITMQ_SERVICE: "true"
+      # Redis is on the compose network too, on its internal port.
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: api
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - rakesetu
+
+  # One-shot, opt-in: `docker compose --profile migrate run --rm migrate`.
+  # Uses the builder stage because drizzle-kit is a dev dependency.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: rakesetu-api:builder
+    profiles: ["migrate"]
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_SSL: "false"
+      # Migrations never touch the broker; keep it out of the dependency chain.
+      USE_RABBITMQ_SERVICE: "false"
+    command: ["npm", "run", "db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rakesetu
+
+networks:
+  rakesetu:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:

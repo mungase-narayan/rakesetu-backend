@@ -1,0 +1,23 @@
+--
+-- audit_log.actor_id: ON DELETE SET NULL -> ON DELETE RESTRICT.
+--
+-- The two halves of migration 0001 turned out to contradict each other. The
+-- DO INSTEAD NOTHING rules make audit_log append-only; `SET NULL` asks Postgres
+-- to blank actor_id when a user is deleted, which it implements by issuing an
+-- UPDATE against audit_log. The rule rewrites that UPDATE away, the referential
+-- integrity check sees no rows affected, and the DELETE fails with
+--
+--   XX000: referential integrity query on "users" from constraint
+--          "audit_log_actor_id_users_id_fk" on "audit_log" gave unexpected result
+--
+-- It fires even against an empty audit_log, because it is the RI query itself
+-- that gets rewritten, not any particular row.
+--
+-- RESTRICT is also the right answer independently: silently blanking who did
+-- something is a rewrite of history, which is the one thing this table is
+-- supposed to make impossible. RESTRICT is enforced with a SELECT, and no rule
+-- touches SELECT.
+--
+ALTER TABLE "audit_log" DROP CONSTRAINT "audit_log_actor_id_users_id_fk";
+--> statement-breakpoint
+ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;
