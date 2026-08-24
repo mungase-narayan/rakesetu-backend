@@ -273,6 +273,25 @@ describe("audit log", () => {
       expect(rows.every((r) => r.action === "user.login")).toBe(true);
     });
 
+    it("filters by correlation id, pulling up one request's whole trail", async () => {
+      // A request whose id we know, and which writes an audit row.
+      const correlationId = `phase2-audit-${Date.now()}`;
+      await request(app)
+        .post("/api/v1/users/login")
+        .set("X-Request-Id", correlationId)
+        .send({ email: admin.email, password: DEMO_PASSWORD })
+        .expect(200);
+
+      const response = await request(app)
+        .get(`/api/v1/audit?correlationId=${correlationId}`)
+        .set(admin.authHeader)
+        .expect(200);
+
+      const rows = response.body.data.data as { correlationId: string }[];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r) => r.correlationId === correlationId)).toBe(true);
+    });
+
     it("returns an entity trail in ascending order", async () => {
       // Sign in again rather than relying on the session created in beforeAll:
       // the "recording" block truncates the table, so the original login row

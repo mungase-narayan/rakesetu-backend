@@ -8,6 +8,10 @@
  */
 import type { Organization, User } from "../../../schema";
 import type { UserRoleContext } from "../../role/types/role.types";
+import {
+  permissionsForRoles,
+  type Permission,
+} from "../../../constants/permission.constants";
 
 export class LoginUserDto {
   id: string;
@@ -77,10 +81,24 @@ export class LoginTokensDto {
   }
 }
 
+/**
+ * The resolved permission union for a set of role grants.
+ *
+ * Computed here from `ROLE_PERMISSIONS` — the same map `requirePermission`
+ * reads — rather than restated in the client. The frontend's `<Can>` and
+ * `usePermission` are a rendering hint over this array and nothing more; the
+ * endpoint behind every gated button is still guarded server-side, so a client
+ * that lies to itself about this list gains a button and a 403.
+ */
+export const resolvePermissions = (
+  roles: readonly UserRoleContext[],
+): Permission[] => [...permissionsForRoles(roles.map((r) => r.name))];
+
 export class LoginResponseDto {
   user: LoginUserDto;
   organization: LoginOrganizationDto | null;
   roles: LoginRoleDto[];
+  permissions: Permission[];
   tokens: LoginTokensDto;
 
   constructor(
@@ -94,6 +112,28 @@ export class LoginResponseDto {
       ? new LoginOrganizationDto(organization)
       : null;
     this.roles = roles.map((r) => new LoginRoleDto(r));
+    this.permissions = resolvePermissions(roles);
     this.tokens = new LoginTokensDto(accessToken);
+  }
+}
+
+/** GET /users/me — the login payload minus the tokens. */
+export class MeResponseDto {
+  user: LoginUserDto;
+  organization: LoginOrganizationDto | null;
+  roles: LoginRoleDto[];
+  permissions: Permission[];
+
+  constructor(
+    user: User,
+    organization: Organization | null,
+    roles: UserRoleContext[],
+  ) {
+    this.user = new LoginUserDto(user);
+    this.organization = organization
+      ? new LoginOrganizationDto(organization)
+      : null;
+    this.roles = roles.map((r) => new LoginRoleDto(r));
+    this.permissions = resolvePermissions(roles);
   }
 }

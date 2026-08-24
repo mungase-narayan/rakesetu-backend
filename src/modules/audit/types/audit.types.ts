@@ -27,6 +27,15 @@ export interface AuditQuery {
   entityId?: string;
   actorId?: string;
   action?: string;
+  /**
+   * Pulls up one request's entire trail.
+   *
+   * This is the filter that makes the correlation id worth carrying: an
+   * approval that fanned out into four writes is four rows nobody can relate
+   * to each other by timestamp alone, and "what did that one click actually
+   * do" is the question an audit gets asked.
+   */
+  correlationId?: string;
   from?: Date;
   to?: Date;
 }

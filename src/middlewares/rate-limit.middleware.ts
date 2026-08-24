@@ -78,7 +78,59 @@ export const createLoginRateLimiter = (
     },
   });
 
+/**
+ * `POST /users/password/forgot` — the one endpoint here that **sends mail**.
+ *
+ * Tight, and keyed on IP alone. Keying on the submitted email would be worse
+ * than useless: the attacker chooses it, so they would get a fresh budget per
+ * target, which is precisely the attack. An unthrottled forgot-password is a
+ * way to spend your SMTP reputation mail-bombing somebody else's inbox.
+ *
+ * The shared-NAT cost is real and accepted: an office hitting this ten times in
+ * a quarter of an hour is either in trouble or up to something.
+ */
+export const createPasswordRateLimiter = (
+  limit: number = env.rateLimit.passwordMax,
+  windowMs: number = env.rateLimit.windowMs,
+) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    handler,
+    keyGenerator: (req: Request) => ipKeyGenerator(req.ip ?? ""),
+  });
+
+/**
+ * The token endpoints — previewing and redeeming an invitation or a reset.
+ *
+ * Deliberately separate from, and looser than, the mail-sending limiter above,
+ * because these send nothing. Sharing one strict budget looked tidy and was
+ * wrong: an office onboarding thirty new staff behind a single NAT spends three
+ * requests each, and would lock itself out of its own invitations.
+ *
+ * What is left to cap is token guessing, and the token is 256 bits of CSPRNG —
+ * so this is a backstop against noise, not the control that makes guessing
+ * infeasible. It is still keyed on IP alone: keying on the token would hand an
+ * attacker a fresh budget for every guess.
+ */
+export const createTokenRateLimiter = (
+  limit: number = env.rateLimit.tokenMax,
+  windowMs: number = env.rateLimit.windowMs,
+) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    handler,
+    keyGenerator: (req: Request) => ipKeyGenerator(req.ip ?? ""),
+  });
+
 export const globalRateLimiter = createGlobalRateLimiter();
 export const loginRateLimiter = createLoginRateLimiter();
+export const passwordRateLimiter = createPasswordRateLimiter();
+export const tokenRateLimiter = createTokenRateLimiter();
 
 export default globalRateLimiter;

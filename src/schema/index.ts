@@ -10,4 +10,6 @@ export * from "./user.schema";
 export * from "./role.schema";
 export * from "./audit-log.schema";
 export * from "./refresh-token.schema";
+export * from "./user-token.schema";
 export * from "./ai-job.schema";
+export * from "./email-job.schema";

@@ -21,10 +21,9 @@ import UserRoleService from "../../role/services/user-role.service";
 import OrganizationService from "../../organization/services/organization.service";
 import AuditService from "../../audit/services/audit.service";
 import {
-  LoginOrganizationDto,
   LoginResponseDto,
-  LoginRoleDto,
   LoginUserDto,
+  MeResponseDto,
 } from "../dto/login-response.dto";
 import {
   LOCK_DURATION_MINUTES,
@@ -262,9 +261,12 @@ class UserController {
   }
 
   /**
-   * The authenticated user's own profile, with organization and roles —
-   * the same payload shape as login minus the tokens. The SPA calls this on
-   * boot to re-validate a persisted session.
+   * The authenticated user's own profile, with organization, roles and the
+   * resolved permission union — the same payload shape as login minus the
+   * tokens. The SPA calls this on boot to re-validate a persisted session, and
+   * it is where `usePermission` gets its list: the map lives in one language,
+   * on the server, and the client is told the answer rather than recomputing
+   * it from a second copy that can drift.
    */
   async me(req: CustomRequest, res: Response) {
     const userId = req.user?.id;
@@ -278,19 +280,15 @@ class UserController {
       this.organizationService.getOrganizationById(user.orgId),
     ]);
 
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          user: new LoginUserDto(user),
-          organization: organization
-            ? new LoginOrganizationDto(organization)
-            : null,
-          roles: userRoles.map((r) => new LoginRoleDto(r)),
-        },
-        "Profile fetched successfully.",
-      ),
-    );
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          new MeResponseDto(user, organization ?? null, userRoles),
+          "Profile fetched successfully.",
+        ),
+      );
   }
 
   /**

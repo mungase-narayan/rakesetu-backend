@@ -89,6 +89,36 @@ services:
     networks:
       - rakesetu
 
+  # Local SMTP with a web inbox. Its whole job is to make "no mail transport
+  # configured" a state that never happens in development — the invitation flow
+  # then runs the same code path locally as in production, instead of falling
+  # back to handing an admin a live credential to copy out of the UI.
+  #
+  #   Inbox: http://localhost:8026
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: rakesetu-mailpit
+    restart: unless-stopped
+    environment:
+      # Cap the stored mail so a long-running dev box does not accumulate
+      # thousands of invitations.
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      # Shifted off Mailpit's defaults (1025/8025) for the same reason every
+      # other port here is shifted — the College-Level project runs alongside.
+      - "1026:1025"
+      - "8026:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - rakesetu
+
   api:
     build:
       context: .
@@ -114,6 +144,11 @@ services:
       USE_RABBITMQ_SERVICE: "true"
       # Redis is on the compose network too, on its internal port.
       REDIS_URL: redis://redis:6379
+      # Mailpit on the compose network, on its internal port. Setting SMTP_HOST
+      # is what makes MailService.enabled true. TLS is derived from the port —
+      # 1025 is plain, so nothing else to declare.
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
       INSTANCE_ID: api
     ports:
       - "4000:4000"
@@ -123,6 +158,8 @@ services:
       redis:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      mailpit:
         condition: service_healthy
     networks:
       - rakesetu

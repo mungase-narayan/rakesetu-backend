@@ -43,6 +43,7 @@ class AuditController {
       entityId: asString(req.query.entityId),
       actorId: asString(req.query.actorId),
       action: asString(req.query.action),
+      correlationId: asString(req.query.correlationId),
       from: parseDate(req.query.from),
       to: parseDate(req.query.to),
     };

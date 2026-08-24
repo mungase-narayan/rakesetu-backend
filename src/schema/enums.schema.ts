@@ -8,7 +8,7 @@
  */
 import { pgEnum } from "drizzle-orm/pg-core";
 
-import { AI_JOB_KINDS } from "../types/queue.types";
+import { AI_JOB_KINDS, EMAIL_TEMPLATE_NAMES } from "../types/queue.types";
 
 /** Who a tenant is. Drives which parts of the product they see. */
 export const ORGANIZATION_TYPES = [
@@ -56,6 +56,48 @@ export const ROLE_STATUSES = ["active", "inactive"] as const;
 export const USER_ROLE_STATUSES = ["active", "inactive", "revoked"] as const;
 
 /**
+ * What a `user_tokens` row lets its holder do.
+ *
+ * `invitation` sets a first password and activates the account; `password_reset`
+ * replaces an existing one. They are separate values rather than one "set the
+ * password" token because the two carry different authority: an invitation
+ * flips `status` to active, and a reset must never be able to reactivate an
+ * account an administrator has suspended.
+ */
+export const USER_TOKEN_TYPES = ["invitation", "password_reset"] as const;
+
+/**
+ * Which email an `email_jobs` row renders.
+ *
+ * These are **templates, not queue kinds.** There is one queue (`email.send`);
+ * the template is a field in the message. Do not copy `AI_JOB_TYPES`' pattern of
+ * routing key === queue name === enum value here — mail differs by what it
+ * renders, not by who consumes it, and per-template queues would be three
+ * bindings that always fan to the same handler.
+ *
+ * The wire contract declares the same list independently
+ * (`EMAIL_TEMPLATE_NAMES` in types/queue.types.ts) so publishing does not have
+ * to import the schema. The assertion below is what keeps the two honest.
+ */
+export const EMAIL_TEMPLATES = EMAIL_TEMPLATE_NAMES satisfies readonly [
+  string,
+  ...string[],
+];
+
+/**
+ * Four states, and the two that are missing are deliberate. There is no
+ * `needs_human` — a failed send needs a resend, not adjudication. There is no
+ * `cancelled` — you cannot un-send an email, so the state would be a lie about
+ * a message that may already be in flight.
+ */
+export const EMAIL_JOB_STATUSES = [
+  "queued",
+  "sending",
+  "sent",
+  "failed",
+] as const;
+
+/**
  * The job kinds `ai_jobs.type` can hold. Derived from AI_JOB_KINDS rather than
  * retyped: the routing key, the queue name and this column must agree, and a
  * typo here would be a silent routing bug — a job written with a type no
@@ -95,6 +137,12 @@ export const userRoleStatusEnum = pgEnum(
   "user_role_status",
   USER_ROLE_STATUSES,
 );
+export const userTokenTypeEnum = pgEnum("user_token_type", USER_TOKEN_TYPES);
+export const emailTemplateEnum = pgEnum("email_template", EMAIL_TEMPLATES);
+export const emailJobStatusEnum = pgEnum(
+  "email_job_status",
+  EMAIL_JOB_STATUSES,
+);
 export const aiJobTypeEnum = pgEnum("ai_job_type", AI_JOB_TYPES);
 export const aiJobStatusEnum = pgEnum("ai_job_status", AI_JOB_STATUSES);
 
@@ -105,5 +153,8 @@ export type Gender = (typeof GENDERS)[number];
 export type RoleName = (typeof ROLE_NAMES)[number];
 export type RoleStatus = (typeof ROLE_STATUSES)[number];
 export type UserRoleStatus = (typeof USER_ROLE_STATUSES)[number];
+export type UserTokenType = (typeof USER_TOKEN_TYPES)[number];
+export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
+export type EmailJobStatus = (typeof EMAIL_JOB_STATUSES)[number];
 export type AiJobType = (typeof AI_JOB_TYPES)[number];
 export type AiJobStatus = (typeof AI_JOB_STATUSES)[number];

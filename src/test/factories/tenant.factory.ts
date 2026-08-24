@@ -193,12 +193,17 @@ const seedTenant = async (
       .onConflictDoNothing();
 
     const user = await userByEmail(seed.email);
-    const role = await createRole(org.id, seed.role);
 
-    await db
-      .insert(userRoles)
-      .values({ userId: user.id, roleId: role.id, orgId: org.id })
-      .onConflictDoNothing();
+    // `additionalRoles` is why this is a loop: the multi-role account is the
+    // only data the role switcher and `activeRole` have to exercise, and a
+    // factory that granted just the primary role would leave it untestable.
+    for (const name of [seed.role, ...(seed.additionalRoles ?? [])]) {
+      const role = await createRole(org.id, name);
+      await db
+        .insert(userRoles)
+        .values({ userId: user.id, roleId: role.id, orgId: org.id })
+        .onConflictDoNothing();
+    }
   }
 
   return org;
