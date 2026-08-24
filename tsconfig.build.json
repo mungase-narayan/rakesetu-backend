@@ -1,7 +1,7 @@
 {
-  // Production build only. `tsconfig.json` deliberately includes the test suite
-  // and the scripts so `npm run type-check` covers them; shipping them in the
-  // image would put testcontainers, the seed and the fixtures into dist/.
+  // Production build only. `tsconfig.json` deliberately includes the scripts so
+  // `npm run type-check` covers them; shipping them in the image would put the
+  // seed and the fixtures into dist/.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     // Pinned explicitly: without `scripts/` in the program, TypeScript would
@@ -10,12 +10,5 @@
     // Dockerfile CMD both point at.
     "rootDir": "."
   },
-  "exclude": [
-    "node_modules",
-    "dist",
-    "src/test",
-    "scripts",
-    "drizzle.config.ts",
-    "vitest.config.mts"
-  ]
+  "exclude": ["node_modules", "dist", "scripts", "drizzle.config.ts"]
 }
