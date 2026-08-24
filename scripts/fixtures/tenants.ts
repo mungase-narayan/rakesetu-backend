@@ -12,7 +12,18 @@ import type { Gender, OrganizationType, RoleName } from "../../src/schema";
 export const DEMO_PASSWORD = "Rakesetu@123";
 
 export interface SeedUser {
+  /** The primary grant. `emailFor(code, role)` resolves against this. */
   role: RoleName;
+  /**
+   * Further grants held by the same person.
+   *
+   * Exactly one seeded account uses this, and it exists for a reason the
+   * product model demands but the six single-role personas cannot exercise:
+   * §4.1 lets a user hold several roles, so `activeRole`, the role switcher
+   * and `handleNavigate`'s preference for it are all live code paths with no
+   * live data behind them. `ops.lead@cr` is that data.
+   */
+  additionalRoles?: readonly RoleName[];
   email: string;
   firstName: string;
   lastName: string;
@@ -38,6 +49,9 @@ const emailIn = (domain: string, role: RoleName) => `${role}@${domain}`;
 
 const CR_DOMAIN = "cr.rakesetu.dev";
 const ACC_DOMAIN = "acc.rakesetu.dev";
+
+/** The one account holding two roles — see `SeedUser.additionalRoles`. */
+export const MULTI_ROLE_EMAIL = `ops.lead@${CR_DOMAIN}`;
 
 /**
  * The railway zone. Carries all six roles with one user each — in production
@@ -109,6 +123,17 @@ export const CENTRAL_RAILWAY: SeedTenant = {
       firstName: "Sneha",
       lastName: "Patil",
       phone: "+91 97640 88213",
+      gender: "female",
+    },
+    // Last on purpose: `emailFor("CR", "freight_controller")` must keep
+    // resolving to Nilesh, and `find` returns the first match.
+    {
+      role: "freight_controller",
+      additionalRoles: ["terminal_supervisor"],
+      email: MULTI_ROLE_EMAIL,
+      firstName: "Devika",
+      lastName: "Nair",
+      phone: "+91 99870 32461",
       gender: "female",
     },
   ],

@@ -8,6 +8,11 @@
  *   2. `AiJobService.enqueue` writes an `ai_jobs` row and publishes its id;
  *   3. the placeholder consumer closes the loop, leaving the rows `succeeded`.
  *
+ * It then does the same for the **email** family, which is the only automated
+ * check that `email.exchange`, `email.send` and their dead-letter side were
+ * actually asserted against a real broker — the test suite runs with the broker
+ * disabled, so it exercises the handler but never the topology.
+ *
  *   npm run queue:check
  *
  * The third point is what makes this an assertion about the *database* and not
@@ -28,13 +33,15 @@ import env from "../src/config/env.config";
 import logger from "../src/logger/winston.logger";
 import RabbitMQService from "../src/utils/rabbitmq";
 import { db, disconnectDatabase } from "../src/database/connection";
-import { aiJobs, organizations } from "../src/schema";
+import { aiJobs, emailJobs, organizations } from "../src/schema";
 import AiJobService from "../src/modules/ai-job/services/ai-job.service";
 import type { CreateAiJobInput } from "../src/modules/ai-job/types/ai-job.types";
+import { emailJobService } from "../src/modules/email/email.provider";
 import {
   AI_EXCHANGES,
   AI_JOB_KINDS,
   AI_ROUTING_KEYS,
+  EMAIL_QUEUES,
   type AiJobKind,
   type AiJobPayload,
 } from "../src/types/queue.types";
@@ -185,17 +192,68 @@ async function main() {
     console.log(`  ai_jobs  ${row.type.padEnd(11)} ${row.status}`);
   }
 
-  await disconnectDatabase();
-
   if (succeeded.length !== AI_JOB_KINDS.length) {
     console.error(
       `\nFAILED — ${succeeded.length}/${AI_JOB_KINDS.length} ai_jobs rows reached "succeeded".`,
+    );
+    await disconnectDatabase();
+    process.exit(1);
+  }
+
+  /* -------------------------------------------------------------- email -- */
+
+  // A second, independent round trip. Unlike the AI half this does not run its
+  // own consumer: the API process is the only consumer of `email.send`, so what
+  // is proved here is that the topology exists and a publish is accepted. The
+  // row reaching `sent` needs `npm run dev` up, and the script says which of
+  // the two it observed rather than pretending.
+  console.log("\n  publishing one email job…");
+
+  const emailBroker = new RabbitMQService(env.rabbitmq.url);
+  await emailBroker.connect();
+  emailJobService.setRabbitMQService(emailBroker);
+
+  const emailJob = await emailJobService.enqueue({
+    orgId: org.id,
+    template: "invitation",
+    to: "queue-check@rakesetu.invalid",
+    vars: {
+      firstName: "Queue",
+      organizationName: org.name,
+      invitedBy: null,
+      ttlHours: 1,
+    },
+    secrets: { url: `${env.frontendUrl}/auth/invitation/queue-check-probe` },
+  });
+
+  // Give a running consumer a moment to pick it up.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await emailBroker.close();
+
+  const [emailRow] = await db
+    .select()
+    .from(emailJobs)
+    .where(inArray(emailJobs.id, [emailJob.id]));
+
+  console.log(
+    `  ${EMAIL_QUEUES.send.padEnd(19)} ${emailRow.status}` +
+      (emailRow.lastError ? `  (${emailRow.lastError})` : ""),
+  );
+
+  await disconnectDatabase();
+
+  if (emailRow.status === "queued") {
+    console.error(
+      "\nFAILED — the email job was published but nothing consumed it. " +
+        "Is `npm run dev` running with RABBITMQ_CONSUME_EMAIL_JOBS=true?",
     );
     process.exit(1);
   }
 
   console.log(
-    `\nOK — ${received.size}/${expected.size} jobs round-tripped; ${succeeded.length} ai_jobs rows are "succeeded".`,
+    `\nOK — ${received.size}/${expected.size} ai jobs round-tripped, ` +
+      `${succeeded.length} ai_jobs rows "succeeded", ` +
+      `and the email family accepted a job (status "${emailRow.status}").`,
   );
   process.exit(0);
 }

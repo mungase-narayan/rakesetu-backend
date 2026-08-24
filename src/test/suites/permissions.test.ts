@@ -39,6 +39,7 @@ const GUARDED_ROUTES: {
     permission: "audit:read",
   },
   { method: "get", path: "/api/v1/roles", permission: "user:read" },
+  { method: "get", path: "/api/v1/users", permission: "user:read" },
 ];
 
 describe("permission model", () => {

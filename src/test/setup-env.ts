@@ -47,6 +47,20 @@ process.env.RABBITMQ_CONSUME_AI_JOBS = "false";
 // own with a small limit rather than relying on these.
 process.env.RATE_LIMIT_MAX = "1000000";
 process.env.LOGIN_RATE_LIMIT_MAX = "1000000";
+process.env.PASSWORD_RATE_LIMIT_MAX = "1000000";
+process.env.TOKEN_RATE_LIMIT_MAX = "1000000";
+
+/**
+ * No SMTP, ever — including the developer's Mailpit.
+ *
+ * `env.config.ts` falls through to `.env` for NODE_ENV=test, and `.env` now
+ * points at the Mailpit container. Without this line the suite would open a
+ * real SMTP connection on every invitation, which is slow when Mailpit is up
+ * and a multi-second connect timeout when it is not — so the suite's speed
+ * would depend on whether someone happened to run `docker compose up mailpit`.
+ * Tests that assert on what was sent inject their own transport instead.
+ */
+process.env.SMTP_HOST = "";
 
 // A failing assertion should be the loudest thing on screen, not the quietest.
 process.env.LOG_LEVEL = "error";

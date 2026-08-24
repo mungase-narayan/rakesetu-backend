@@ -3,8 +3,9 @@
  *
  * There is no public signup in RakeSetu, so this script is not a convenience —
  * it is the only way an account comes into existence. It seeds **two** tenants:
- * Central Railway (all six roles, one user each, so every persona can be signed
- * in) and Aditya Cement (a freight-customer organization with its own admin).
+ * Central Railway (all six roles, one user each, plus one account holding two
+ * of them so the role switcher has something real to switch between) and
+ * Aditya Cement (a freight-customer organization with its own admin).
  * The second one exists so the cross-tenant isolation suite has two tenants to
  * compare; with one, "org A cannot read org B" is not a statement about
  * anything. The tenant definitions live in scripts/fixtures/tenants.ts so the
@@ -27,6 +28,7 @@ import { db, disconnectDatabase } from "../src/database/connection";
 import {
   aiJobs,
   auditLog,
+  userTokens,
   organizations,
   refreshTokens,
   roles,
@@ -55,12 +57,14 @@ const reset = async (): Promise<void> => {
   await db.execute(sql`TRUNCATE TABLE ${auditLog}`);
   await db.delete(aiJobs);
   await db.delete(refreshTokens);
+  // Cascades from users anyway; deleted explicitly so the log below is true.
+  await db.delete(userTokens);
   await db.delete(userRoles);
   await db.delete(users);
   await db.delete(roles);
   await db.delete(organizations);
   console.log(
-    "  reset         cleared audit_log, ai_jobs, refresh_tokens, organizations, roles, users\n",
+    "  reset         cleared audit_log, ai_jobs, refresh_tokens, user_tokens, organizations, roles, users\n",
   );
 };
 
@@ -122,8 +126,10 @@ const seedUsers = async (
   let count = 0;
 
   for (const seed of tenant.users) {
-    const role = rolesByName.get(seed.role);
-    if (!role) continue;
+    const granted = [seed.role, ...(seed.additionalRoles ?? [])]
+      .map((name) => rolesByName.get(name))
+      .filter((r): r is Role => Boolean(r));
+    if (granted.length === 0) continue;
 
     await db
       .insert(users)
@@ -150,12 +156,18 @@ const seedUsers = async (
       .from(users)
       .where(eq(users.email, seed.email));
 
-    await db
-      .insert(userRoles)
-      .values({ userId: user.id, roleId: role.id, orgId: org.id })
-      .onConflictDoNothing();
+    for (const role of granted) {
+      await db
+        .insert(userRoles)
+        .values({ userId: user.id, roleId: role.id, orgId: org.id })
+        .onConflictDoNothing();
+    }
 
-    console.log(`  user          ${seed.email.padEnd(36)} ${seed.role}`);
+    console.log(
+      `  user          ${seed.email.padEnd(36)} ${granted
+        .map((r) => r.name)
+        .join(" + ")}`,
+    );
     count += 1;
   }
 

@@ -33,20 +33,25 @@ export const emailFor = (code: TenantCode, role: RoleName): string => {
   return user.email;
 };
 
-export const loginAs = async (
+/**
+ * Signs in by address rather than by persona.
+ *
+ * `loginAs` resolves a role to the *first* seeded account holding it, which is
+ * the right default and the wrong thing for the multi-role account: it holds
+ * `freight_controller` too, so `loginAs("freight_controller")` will never
+ * reach it. Tests that need that account name it.
+ */
+export const loginWith = async (
   app: Application,
-  role: RoleName,
-  code: TenantCode = "CR",
+  email: string,
 ): Promise<Session> => {
-  const email = emailFor(code, role);
-
   const response = await request(app)
     .post("/api/v1/users/login")
     .send({ email, password: DEMO_PASSWORD });
 
   if (response.status !== 200) {
     throw new Error(
-      `loginAs(${role}, ${code}) failed with ${response.status}: ${JSON.stringify(response.body)}`,
+      `loginWith(${email}) failed with ${response.status}: ${JSON.stringify(response.body)}`,
     );
   }
 
@@ -61,6 +66,12 @@ export const loginAs = async (
     email,
   };
 };
+
+export const loginAs = async (
+  app: Application,
+  role: RoleName,
+  code: TenantCode = "CR",
+): Promise<Session> => loginWith(app, emailFor(code, role));
 
 /** supertest types this as string | string[] depending on the header count. */
 export const parseCookies = (raw: unknown): string[] => {

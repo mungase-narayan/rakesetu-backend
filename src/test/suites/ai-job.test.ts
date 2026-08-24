@@ -28,7 +28,7 @@ describe("ai job publisher", () => {
     service = new AiJobService(logger);
     const broker = new RabbitMQService("amqp://unused", {
       enabled: false,
-      fallbackHandler: (payload) => service.handleJob(payload),
+      fallbackHandlers: { ai: (payload) => service.handleJob(payload) },
     });
     service.setRabbitMQService(broker);
   });

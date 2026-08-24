@@ -22,6 +22,20 @@
       "when": 1787512630614,
       "tag": "0002_remarkable_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787543982875,
+      "tag": "0003_aspiring_earthquake",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787550546428,
+      "tag": "0004_talented_red_wolf",
+      "breakpoints": true
     }
   ]
 }

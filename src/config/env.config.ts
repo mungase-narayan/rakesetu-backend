@@ -94,6 +94,8 @@ const env: EnvConfig = {
     windowMs: getNumber("RATE_LIMIT_WINDOW_MINUTES", 15) * 60 * 1000,
     max: getNumber("RATE_LIMIT_MAX", 300),
     loginMax: getNumber("LOGIN_RATE_LIMIT_MAX", 10),
+    passwordMax: getNumber("PASSWORD_RATE_LIMIT_MAX", 10),
+    tokenMax: getNumber("TOKEN_RATE_LIMIT_MAX", 60),
   },
 
   rabbitmq: {
@@ -103,7 +105,37 @@ const env: EnvConfig = {
       : getOptional("RABBITMQ_URL"),
     enabled: useRabbitMQ,
     consumeAiJobs: getBoolean("RABBITMQ_CONSUME_AI_JOBS", true),
+    consumeEmailJobs: getBoolean("RABBITMQ_CONSUME_EMAIL_JOBS", true),
     prefetch: getNumber("RABBITMQ_PREFETCH", 1),
+    emailPrefetch: getNumber("RABBITMQ_EMAIL_PREFETCH", 10),
+  },
+
+  mail: {
+    // Derived, not a flag: if there is nowhere to send mail there is nothing to
+    // enable. See MailConfig for why this is optional at all.
+    enabled: Boolean(process.env.SMTP_HOST),
+    // The same six variable names College-Level uses, so one .env works for
+    // both projects and nobody has to remember which spells it differently.
+    host: getOptional("SMTP_HOST"),
+    port: getNumber("SMTP_PORT", 587),
+    // Derived, exactly as College-Level does it — 465 is SMTPS, 587 STARTTLS.
+    secure: getNumber("SMTP_PORT", 587) === 465,
+    user: getOptional("SMTP_USER"),
+    password: getOptional("SMTP_PASSWORD"),
+    fromName: getOptional("SMTP_FROM_NAME", "RakeSetu"),
+    fromEmail: getOptional("SMTP_FROM_EMAIL", "no-reply@rakesetu.dev"),
+    retryBaseMs: getNumber("EMAIL_RETRY_BASE_MS", 1000),
+  },
+
+  tokens: {
+    /**
+     * Seven days for an invitation: it is sent to somebody who may be on leave,
+     * and an admin re-sending it is cheap. One hour for a password reset,
+     * because that link is a live credential for an *existing* account and the
+     * person asking for it is, by definition, at their keyboard right now.
+     */
+    invitationTtlHours: getNumber("INVITATION_TTL_HOURS", 24 * 7),
+    passwordResetTtlHours: getNumber("PASSWORD_RESET_TTL_HOURS", 1),
   },
 
   frontendUrl: getOptional("FRONTEND_URL", "http://localhost:5175"),

@@ -1,39 +1,64 @@
 /**
  * RabbitMQ client: owns the connection, asserts the topology once at boot, and
- * exposes publish/consume for AI jobs.
+ * exposes publish/consume for the two job families — `ai.*` and `email.*`.
  *
- * Two behaviours are worth knowing about:
+ * **One connection, two families.** The families differ by six strings and a
+ * TTL, so they are described by a `QueueFamily` record and driven through one
+ * set of private primitives (`assertFamily`, `publishTo`, `consumeFrom`). A
+ * second `RabbitMQService` would mean a second TCP connection, a second
+ * lifecycle in `App`, and a health check that has to report two things — all to
+ * vary data.
+ *
+ * Three behaviours are worth knowing about:
  *
  *  - **Disabled mode.** `USE_RABBITMQ_SERVICE=false` never contacts a broker.
- *    Publishing runs `fallbackHandler` inline instead, so a serverless host
- *    (Vercel), a test run or a laptop without Docker still works end to end —
- *    just synchronously.
+ *    Publishing runs the family's `fallbackHandlers` entry inline instead, so a
+ *    serverless host (Vercel), a test run or a laptop without Docker still
+ *    works end to end — just synchronously.
  *  - **Failure is not silent.** A handler that throws nacks without requeue, so
  *    the message lands in that consumer's dead-letter queue rather than looping
  *    forever at the head of the queue.
+ *  - **Prefetch is per-consumer, not per-connection.** amqplib's
+ *    `channel.prefetch(n)` with the default `global=false` applies to consumers
+ *    registered *after* the call, so `consumeFrom` sets it immediately before
+ *    `consume` and each family gets its own value on the shared channel.
  */
 import amqp, { Channel, ChannelModel, ConsumeMessage } from "amqplib";
 
 import logger from "../logger/winston.logger";
 import {
-  AI_EXCHANGES,
-  AI_FAILED_QUEUES,
-  AI_JOB_KINDS,
-  AI_MESSAGE_TTL_MS,
-  AI_QUEUES,
-  AI_ROUTING_KEYS,
+  AI_FAMILY,
+  EMAIL_FAMILY,
   type AiJobHandler,
   type AiJobKind,
   type AiJobPayload,
+  type EmailJobHandler,
+  type EmailJobMessage,
+  type QueueEnvelope,
+  type QueueFamily,
 } from "../types/queue.types";
 
 interface RabbitMQOptions {
-  /** When false the broker is never contacted; jobs run via fallbackHandler. */
+  /** When false the broker is never contacted; jobs run inline. */
   enabled?: boolean;
-  /** Called instead of publishing when the service is disabled. */
-  fallbackHandler?: AiJobHandler;
-  /** Unacked messages allowed per consumer. One = strict fair dispatch. */
+  /**
+   * Run instead of publishing when the service is disabled, one per family.
+   *
+   * Per-family rather than a single function because the two carry unrelated
+   * payloads: routing an email message into the AI handler would mark an
+   * `ai_jobs` row that does not exist and drop the mail on the floor.
+   */
+  fallbackHandlers?: {
+    ai?: AiJobHandler;
+    email?: EmailJobHandler;
+  };
+  /** Unacked AI messages per consumer. One = strict fair dispatch. */
   prefetch?: number;
+  /**
+   * Unacked email messages per consumer. Higher than the AI default because an
+   * SMTP round trip is milliseconds, where an LLM call is seconds.
+   */
+  emailPrefetch?: number;
 }
 
 class RabbitMQService {
@@ -42,13 +67,15 @@ class RabbitMQService {
   private url: string;
   private enabled: boolean;
   private prefetch: number;
-  private fallbackHandler?: AiJobHandler;
+  private emailPrefetch: number;
+  private fallbackHandlers: NonNullable<RabbitMQOptions["fallbackHandlers"]>;
 
   constructor(url: string, options: RabbitMQOptions = {}) {
     this.url = url;
     this.enabled = options.enabled ?? true;
     this.prefetch = options.prefetch ?? 1;
-    this.fallbackHandler = options.fallbackHandler;
+    this.emailPrefetch = options.emailPrefetch ?? 10;
+    this.fallbackHandlers = options.fallbackHandlers ?? {};
   }
 
   /** True only when the broker is enabled *and* a channel is open. */
@@ -92,59 +119,79 @@ class RabbitMQService {
   }
 
   /**
-   * Asserts exchanges, queues and bindings. Idempotent, so every replica can
-   * run it at boot and the topology exists before the first publish.
+   * Asserts every family's exchanges, queues and bindings. Idempotent, so each
+   * replica can run it at boot and the topology exists before the first publish.
    */
   private async setup(): Promise<void> {
-    const channel = this.requireChannel();
-
-    await channel.assertExchange(AI_EXCHANGES.DEAD_LETTER, "direct", {
-      durable: true,
-    });
-    await channel.assertExchange(AI_EXCHANGES.MAIN, "direct", {
-      durable: true,
-    });
-
-    for (const kind of AI_JOB_KINDS) {
-      const routingKey = AI_ROUTING_KEYS[kind];
-
-      // Dead-letter side first: the main queue names it as its DLX, so it has
-      // to be bound before a message can possibly fail.
-      await channel.assertQueue(AI_FAILED_QUEUES[kind], { durable: true });
-      await channel.bindQueue(
-        AI_FAILED_QUEUES[kind],
-        AI_EXCHANGES.DEAD_LETTER,
-        routingKey,
-      );
-
-      await channel.assertQueue(AI_QUEUES[kind], {
-        durable: true,
-        arguments: {
-          "x-dead-letter-exchange": AI_EXCHANGES.DEAD_LETTER,
-          "x-dead-letter-routing-key": routingKey,
-          "x-message-ttl": AI_MESSAGE_TTL_MS,
-        },
-      });
-      await channel.bindQueue(AI_QUEUES[kind], AI_EXCHANGES.MAIN, routingKey);
-    }
+    await this.assertFamily(AI_FAMILY);
+    await this.assertFamily(EMAIL_FAMILY);
 
     logger.info("RabbitMQ exchanges, queues and bindings ready");
   }
 
-  async publishAiJob(payload: AiJobPayload): Promise<void> {
+  /**
+   * One family's topology.
+   *
+   * **Dead-letter side first, per kind.** The main queue names its DLX in its
+   * own arguments, so the target has to exist before a message can possibly
+   * fail into it.
+   */
+  private async assertFamily<K extends string>(
+    family: QueueFamily<K>,
+  ): Promise<void> {
+    const channel = this.requireChannel();
+
+    await channel.assertExchange(family.deadLetterExchange, "direct", {
+      durable: true,
+    });
+    await channel.assertExchange(family.exchange, "direct", { durable: true });
+
+    for (const kind of family.kinds) {
+      const routingKey = family.routingKeys[kind];
+
+      await channel.assertQueue(family.failedQueues[kind], { durable: true });
+      await channel.bindQueue(
+        family.failedQueues[kind],
+        family.deadLetterExchange,
+        routingKey,
+      );
+
+      await channel.assertQueue(family.queues[kind], {
+        durable: true,
+        arguments: {
+          "x-dead-letter-exchange": family.deadLetterExchange,
+          "x-dead-letter-routing-key": routingKey,
+          "x-message-ttl": family.messageTtlMs,
+        },
+      });
+      await channel.bindQueue(family.queues[kind], family.exchange, routingKey);
+    }
+  }
+
+  /**
+   * Publishes one message, or runs the family's inline fallback when the broker
+   * is disabled.
+   */
+  private async publishTo<K extends string, M extends QueueEnvelope<K>>(
+    family: QueueFamily<K>,
+    message: M,
+  ): Promise<void> {
     if (!this.enabled) {
-      if (!this.fallbackHandler) {
+      const fallback = this.fallbackHandlers[family.name] as
+        ((payload: M) => Promise<void>) | undefined;
+
+      if (!fallback) {
         throw new Error(
-          "RabbitMQ disabled and no fallbackHandler configured for AI jobs",
+          `RabbitMQ disabled and no fallbackHandler configured for ${family.name} jobs`,
         );
       }
 
-      await this.fallbackHandler(payload);
+      await fallback(message);
       logger.info({
-        event: "AiJobRanInline",
-        kind: payload.kind,
-        jobId: payload.jobId,
-        correlationId: payload.correlationId,
+        event: `${family.logPrefix}RanInline`,
+        kind: message.kind,
+        jobId: message.jobId,
+        correlationId: message.correlationId,
       });
       return;
     }
@@ -152,19 +199,19 @@ class RabbitMQService {
     const channel = this.requireChannel();
 
     try {
-      const buffer = Buffer.from(JSON.stringify(payload));
+      const buffer = Buffer.from(JSON.stringify(message));
 
       const enqueued = channel.publish(
-        AI_EXCHANGES.MAIN,
-        AI_ROUTING_KEYS[payload.kind],
+        family.exchange,
+        family.routingKeys[message.kind],
         buffer,
         {
           persistent: true,
           contentType: "application/json",
-          messageId: `${payload.kind}-${payload.jobId}`,
-          correlationId: payload.correlationId,
+          messageId: `${message.kind}-${message.jobId}`,
+          correlationId: message.correlationId,
           timestamp: Date.now(),
-          headers: { orgId: payload.orgId, kind: payload.kind },
+          headers: { orgId: message.orgId, kind: message.kind },
         },
       );
 
@@ -173,69 +220,83 @@ class RabbitMQService {
       }
 
       logger.info({
-        event: "AiJobPublished",
-        kind: payload.kind,
-        jobId: payload.jobId,
-        orgId: payload.orgId,
-        correlationId: payload.correlationId,
+        event: `${family.logPrefix}Published`,
+        kind: message.kind,
+        jobId: message.jobId,
+        orgId: message.orgId,
+        correlationId: message.correlationId,
       });
     } catch (error) {
-      logger.error({ event: "PublishAiJobFailed", kind: payload.kind, error });
+      logger.error({
+        event: `Publish${family.logPrefix}Failed`,
+        kind: message.kind,
+        error,
+      });
       throw error;
     }
   }
 
   /**
-   * Subscribes `handler` to one job kind. Ack on success; nack-without-requeue
-   * on failure, which routes the message to `ai.<kind>.failed`.
+   * Subscribes `handler` to one queue. Ack on success; nack-without-requeue on
+   * failure, which routes the message to that kind's `.failed` queue.
+   *
+   * There is exactly one nack policy here, deliberately. A family that wants
+   * retries implements them in its handler — deciding to retry needs to know
+   * whether the failure was transient, and only the handler knows that.
    */
-  async consumeAiJobs(kind: AiJobKind, handler: AiJobHandler): Promise<void> {
+  private async consumeFrom<K extends string, M extends QueueEnvelope<K>>(
+    family: QueueFamily<K>,
+    kind: K,
+    handler: (message: M) => Promise<void>,
+    prefetch: number,
+  ): Promise<void> {
     if (!this.enabled) {
-      logger.info(`RabbitMQ disabled — skipping ${kind} consumer`);
+      logger.info(
+        `RabbitMQ disabled — skipping ${family.queues[kind]} consumer`,
+      );
       return;
     }
 
     const channel = this.requireChannel();
-    await channel.prefetch(this.prefetch);
+    // Set immediately before `consume`: with global=false this applies to
+    // consumers registered after the call, which is what lets the two families
+    // hold different values on one channel.
+    await channel.prefetch(prefetch);
 
     await channel.consume(
-      AI_QUEUES[kind],
+      family.queues[kind],
       async (msg: ConsumeMessage | null) => {
         if (!msg) return;
 
-        let payload: AiJobPayload;
+        let message: M;
         try {
-          payload = JSON.parse(msg.content.toString());
+          message = JSON.parse(msg.content.toString()) as M;
         } catch (error) {
-          // Unparseable content will never parse on a retry — dead-letter it now.
-          logger.error({ event: "AiJobMalformed", kind, error });
+          // Unparseable: no amount of redelivery fixes it.
+          logger.error({ event: `${family.logPrefix}Malformed`, kind, error });
           channel.nack(msg, false, false);
           return;
         }
 
         try {
           logger.info({
-            event: "AiJobReceived",
+            event: `${family.logPrefix}Received`,
             kind,
-            jobId: payload.jobId,
-            correlationId: payload.correlationId,
+            jobId: message.jobId,
+            correlationId: message.correlationId,
           });
-
-          await handler(payload);
+          await handler(message);
           channel.ack(msg);
-
           logger.info({
-            event: "AiJobProcessed",
+            event: `${family.logPrefix}Processed`,
             kind,
-            jobId: payload.jobId,
-            correlationId: payload.correlationId,
+            jobId: message.jobId,
           });
         } catch (error) {
           logger.error({
-            event: "AiJobFailed",
+            event: `${family.logPrefix}Failed`,
             kind,
-            jobId: payload.jobId,
-            correlationId: payload.correlationId,
+            jobId: message.jobId,
             error,
           });
           channel.nack(msg, false, false);
@@ -243,16 +304,37 @@ class RabbitMQService {
       },
     );
 
-    logger.info(`Consuming ${AI_QUEUES[kind]} events`);
+    logger.info(`Consuming ${family.queues[kind]}`);
   }
 
-  /** Registers the same handler for every job kind. */
+  /* ---------------------------------------------------------------- ai -- */
+
+  async publishAiJob(payload: AiJobPayload): Promise<void> {
+    return this.publishTo(AI_FAMILY, payload);
+  }
+
+  async consumeAiJobs(kind: AiJobKind, handler: AiJobHandler): Promise<void> {
+    return this.consumeFrom(AI_FAMILY, kind, handler, this.prefetch);
+  }
+
+  /** Every AI kind through one handler, which switches on `payload.kind`. */
   async consumeAllAiJobs(handler: AiJobHandler): Promise<void> {
-    for (const kind of AI_JOB_KINDS) {
+    for (const kind of AI_FAMILY.kinds) {
       await this.consumeAiJobs(kind, handler);
     }
   }
 
+  /* ------------------------------------------------------------- email -- */
+
+  async publishEmailJob(message: EmailJobMessage): Promise<void> {
+    return this.publishTo(EMAIL_FAMILY, message);
+  }
+
+  async consumeEmailJobs(handler: EmailJobHandler): Promise<void> {
+    return this.consumeFrom(EMAIL_FAMILY, "send", handler, this.emailPrefetch);
+  }
+
+  /** Closes the channel then the connection, so a SIGTERM does not drop acks. */
   async close(): Promise<void> {
     try {
       await this.channel?.close();

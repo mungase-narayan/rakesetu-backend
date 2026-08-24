@@ -38,7 +38,7 @@ export const withTenant = asyncHandler(
  * clear 500 at the first line, rather than a `Cannot read properties of
  * undefined` five frames down inside drizzle.
  */
-export const requireTenant = (req: CustomRequest) => {
+export const requireTenant = <T>(req: CustomRequest<T>) => {
   if (!req.tenant) {
     throw new ApiError(
       500,

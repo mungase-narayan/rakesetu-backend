@@ -102,6 +102,9 @@ class AuditService {
     }
     if (query.actorId) conditions.push(eq(auditLog.actorId, query.actorId));
     if (query.action) conditions.push(eq(auditLog.action, query.action));
+    if (query.correlationId) {
+      conditions.push(eq(auditLog.correlationId, query.correlationId));
+    }
     if (query.from) conditions.push(gte(auditLog.at, query.from));
     if (query.to) conditions.push(lte(auditLog.at, query.to));
 

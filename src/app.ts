@@ -26,6 +26,7 @@ import { globalRateLimiter } from "./middlewares/rate-limit.middleware";
 import errorHandlerMiddleware from "./middlewares/error-handler.middleware";
 
 import AiJobService from "./modules/ai-job/services/ai-job.service";
+import { emailJobService } from "./modules/email/email.provider";
 import HealthController from "./modules/health/health.controller";
 
 import userRouter from "./modules/user/routes/user.routes";
@@ -49,12 +50,17 @@ export class App {
     this.rabbitmqService = new RabbitMQService(env.rabbitmq.url, {
       enabled: env.rabbitmq.enabled,
       prefetch: env.rabbitmq.prefetch,
-      fallbackHandler: (payload) => this.aiJobService.handleJob(payload),
+      emailPrefetch: env.rabbitmq.emailPrefetch,
+      fallbackHandlers: {
+        ai: (payload) => this.aiJobService.handleJob(payload),
+        email: (message) => emailJobService.handleJob(message),
+      },
     });
-    // The two reference each other — the broker calls the service as its
-    // fallback handler, and the service publishes through the broker — so the
+    // These reference each other — the broker calls the services as its
+    // fallback handlers, and the services publish through the broker — so the
     // second edge is wired after both exist.
     this.aiJobService.setRabbitMQService(this.rabbitmqService);
+    emailJobService.setRabbitMQService(this.rabbitmqService);
 
     this.healthController = new HealthController(
       this.rabbitmqService,
@@ -151,16 +157,27 @@ export class App {
    * leaving this process as a pure producer.
    */
   async consumerSetup() {
-    if (!env.rabbitmq.consumeAiJobs) {
+    if (env.rabbitmq.consumeAiJobs) {
+      await this.rabbitmqService.consumeAllAiJobs(async (payload) => {
+        await this.aiJobService.handleJob(payload);
+      });
+    } else {
       logger.info(
-        "RABBITMQ_CONSUME_AI_JOBS=false — running as a producer only",
+        "RABBITMQ_CONSUME_AI_JOBS=false — AI jobs are produced here, consumed elsewhere",
       );
-      return;
     }
 
-    await this.rabbitmqService.consumeAllAiJobs(async (payload) => {
-      await this.aiJobService.handleJob(payload);
-    });
+    if (env.rabbitmq.consumeEmailJobs) {
+      await this.rabbitmqService.consumeEmailJobs(async (message) => {
+        await emailJobService.handleJob(message);
+      });
+    } else {
+      // warn, not info: unlike ai.*, no other service will ever drain this
+      // queue. False here means mail silently stops.
+      logger.warn(
+        "RABBITMQ_CONSUME_EMAIL_JOBS=false — nothing will drain email.send",
+      );
+    }
   }
 
   async start() {
