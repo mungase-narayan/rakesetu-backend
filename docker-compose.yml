@@ -1,11 +1,12 @@
 # ---------------------------------------------------------------------------
 # RakeSetu backend — local infrastructure.
 #
-# Postgres, Redis and RabbitMQ. The API itself runs on the host via `npm run dev`,
+# Postgres, Redis, RabbitMQ, Mailpit and MinIO. The API itself runs on the host via
+# `npm run dev`,
 # which is the fast feedback loop; the `api` service below is opt-in for
 # testing the production image.
 #
-#   docker compose up -d postgres redis rabbitmq   # then set DB_PORT=55433 in .env
+#   docker compose up -d postgres redis rabbitmq minio   # then set DB_PORT=55433 in .env
 #   docker compose --profile api up -d --build
 #
 # The four-replica + nginx layer from the College-Level compose is deliberately
@@ -119,6 +120,56 @@ services:
     networks:
       - rakesetu
 
+  # Object storage for documents (§8), speaking the S3 API so the same client
+  # code runs here and against real S3 in a deployed environment. Local
+  # development therefore exercises the actual upload, the actual presigned URL
+  # and the actual expiry — a filesystem stub proves none of the three.
+  #
+  #   Console: http://localhost:9101 (minioadmin / minioadmin)
+  minio:
+    image: minio/minio:latest
+    container_name: rakesetu-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      # Shifted off 9000/9001 for the same reason every other port here is
+      # shifted — other projects on this machine claim the defaults.
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - rakesetu
+
+  # One-shot: creates the two buckets and leaves. Without it the first upload
+  # fails with NoSuchBucket, which reads like a credentials problem and is not.
+  minio-init:
+    image: minio/mc:latest
+    container_name: rakesetu-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} &&
+      mc mb --ignore-existing local/${S3_PRIVATE_BUCKET:-rakesetu} &&
+      mc mb --ignore-existing local/${S3_PUBLIC_BUCKET:-rakesetu-public} &&
+      mc anonymous set download local/${S3_PUBLIC_BUCKET:-rakesetu-public} &&
+      echo 'buckets ready: ${S3_PRIVATE_BUCKET:-rakesetu} (private), ${S3_PUBLIC_BUCKET:-rakesetu-public} (public)'
+      "
+    networks:
+      - rakesetu
+
   api:
     build:
       context: .
@@ -149,6 +200,9 @@ services:
       # 1025 is plain, so nothing else to declare.
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
+      # MinIO on the compose network, on its internal port.
+      S3_ENDPOINT: http://minio:9000
+      S3_FORCE_PATH_STYLE: "true"
       INSTANCE_ID: api
     ports:
       - "4000:4000"
@@ -160,6 +214,8 @@ services:
       rabbitmq:
         condition: service_healthy
       mailpit:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - rakesetu
@@ -198,3 +254,4 @@ volumes:
   postgres-data:
   redis-data:
   rabbitmq-data:
+  minio-data:

@@ -34,6 +34,32 @@ import roleRouter from "./modules/role/routes/role.routes";
 import auditRouter from "./modules/audit/routes/audit.routes";
 import organizationRouter from "./modules/organization/routes/organization.routes";
 
+// Phase 3 — master data, network and documents.
+import networkRouter from "./modules/network/routes/network.routes";
+import chargeRuleRouter from "./modules/charge-rule/routes/charge-rule.routes";
+import documentRouter from "./modules/document/routes/document.routes";
+import commodityRouter from "./modules/commercial/routes/commodity.routes";
+import customerRouter from "./modules/commercial/routes/customer.routes";
+import {
+  wagonTypeRouter,
+  wagonRouter,
+  rakeRouter,
+} from "./modules/asset/routes/asset.routes";
+import {
+  terminalRouter,
+  embargoRouter,
+} from "./modules/terminal/routes/terminal.routes";
+
+// Phase 4 — the event spine and the digital twin.
+import {
+  rakeEventRouter,
+  networkLiveRouter,
+  anomalyRouter,
+} from "./modules/rake-event/routes/rake-event.routes";
+
+// Phase 5 — the live read side.
+import etaRouter from "./modules/eta/routes/eta.routes";
+
 export class App {
   static readonly instanceId = process.env.INSTANCE_ID || "local";
 
@@ -145,6 +171,33 @@ export class App {
     this.app.use("/api/v1/organizations", organizationRouter);
     this.app.use("/api/v1/roles", roleRouter);
     this.app.use("/api/v1/audit", auditRouter);
+
+    // Master data (Phase 3). Reference data first, then the assets and
+    // commercial parties that point at it.
+    this.app.use("/api/v1/network", networkRouter);
+    this.app.use("/api/v1/commodities", commodityRouter);
+    this.app.use("/api/v1/wagon-types", wagonTypeRouter);
+    this.app.use("/api/v1/wagons", wagonRouter);
+    this.app.use("/api/v1/rakes", rakeRouter);
+    this.app.use("/api/v1/terminals", terminalRouter);
+    this.app.use("/api/v1/embargoes", embargoRouter);
+    this.app.use("/api/v1/customers", customerRouter);
+    this.app.use("/api/v1/charge-rules", chargeRuleRouter);
+    this.app.use("/api/v1/documents", documentRouter);
+
+    // The event spine (Phase 4). Both of these share a mount path with a
+    // master-data router above and are registered after it: Express walks the
+    // stack in order and a router that matches no path simply falls through, so
+    // `/rakes/:id` keeps reaching the asset router while `/rakes/:id/events`
+    // reaches this one.
+    this.app.use("/api/v1/rakes", rakeEventRouter);
+    this.app.use("/api/v1/network", networkLiveRouter);
+    this.app.use("/api/v1/anomalies", anomalyRouter);
+
+    // The ETA engine (Phase 5). Its own mount rather than a branch of
+    // `/network`, because Phase 6 and Phase 7 both call it about things that
+    // are not rakes on a map — a consignment and a hypothetical repositioning.
+    this.app.use("/api/v1/eta", etaRouter);
 
     // Must be registered last: Express picks error handlers by arity, and this
     // one only sees errors from the routes declared above it.

@@ -238,30 +238,59 @@ export class ScopedRepository<T extends ScopedTable> {
  * different import, an explicit name, and a class that reads as an assertion.
  * If this appears in a diff on a table with an `org_id` column, that is the
  * review finding.
+ *
+ * It mirrors ScopedRepository's surface — paginate, update, delete — minus the
+ * scope, so a service does not have to switch idioms when it crosses the
+ * tenancy line. The one difference is the **key column**: reference tables are
+ * keyed by their real code (`stations.code`, `commodities.code`), not by a
+ * uuid, so the key is supplied at construction rather than assumed to be `id`.
  */
-export class UnscopedRepository<T extends PgTable & { id: PgColumn }> {
+export class UnscopedRepository<T extends PgTable> {
+  private readonly columns: Record<string, PgColumn>;
+  private readonly key: PgColumn;
+
   constructor(
     private readonly table: T,
+    /**
+     * The primary key. Optional only because most tables really do key on
+     * `id`; passing the wrong column here would make `findByKey` silently
+     * answer a different question, so it is stated explicitly wherever the key
+     * is not `id`.
+     */
+    keyColumn?: PgColumn,
     private readonly database: DB = db,
-  ) {}
+  ) {
+    this.columns = getTableColumns(this.table) as Record<string, PgColumn>;
+    const fallback = this.columns.id;
+    if (!keyColumn && !fallback) {
+      throw new Error(
+        "UnscopedRepository needs a key column — this table has no `id`",
+      );
+    }
+    this.key = keyColumn ?? fallback;
+  }
 
-  async select(where?: SQL): Promise<T["$inferSelect"][]> {
-    const rows = where
-      ? await this.database
-          .select()
-          .from(this.table as PgTable)
-          .where(where)
-      : await this.database.select().from(this.table as PgTable);
+  async select(where?: SQL, orderBy?: SQL): Promise<T["$inferSelect"][]> {
+    const query = this.database
+      .select()
+      .from(this.table as PgTable)
+      .where(where);
+    const rows = orderBy ? await query.orderBy(orderBy) : await query;
     return rows as T["$inferSelect"][];
   }
 
-  async findById(id: string): Promise<T["$inferSelect"] | null> {
+  async selectOne(where: SQL): Promise<T["$inferSelect"] | null> {
     const [row] = await this.database
       .select()
       .from(this.table as PgTable)
-      .where(eq(this.table.id, id))
+      .where(where)
       .limit(1);
     return (row as T["$inferSelect"]) ?? null;
+  }
+
+  /** By primary key — `id`, or whatever column was named at construction. */
+  async findByKey(key: string): Promise<T["$inferSelect"] | null> {
+    return this.selectOne(eq(this.key, key));
   }
 
   async insert(values: T["$inferInsert"]): Promise<T["$inferSelect"]> {
@@ -271,6 +300,89 @@ export class UnscopedRepository<T extends PgTable & { id: PgColumn }> {
       .values(values)
       .returning()) as T["$inferSelect"][];
     return rows[0];
+  }
+
+  async insertMany(values: T["$inferInsert"][]): Promise<T["$inferSelect"][]> {
+    if (values.length === 0) return [];
+    return (
+      (await this.database
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .insert(this.table as any)
+        .values(values)
+        .returning()) as T["$inferSelect"][]
+    );
+  }
+
+  async update(
+    key: string,
+    values: Partial<T["$inferInsert"]>,
+  ): Promise<T["$inferSelect"] | null> {
+    const patch: Record<string, unknown> = { ...values };
+    if ("updatedAt" in this.columns) patch.updatedAt = new Date();
+
+    const rows = (await this.database
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .update(this.table as any)
+      .set(patch)
+      .where(eq(this.key, key))
+      .returning()) as T["$inferSelect"][];
+    return rows[0] ?? null;
+  }
+
+  async delete(key: string): Promise<boolean> {
+    const rows = await this.database
+      .delete(this.table as PgTable)
+      .where(eq(this.key, key))
+      .returning();
+    return rows.length > 0;
+  }
+
+  async count(where?: SQL): Promise<number> {
+    const [row] = await this.database
+      .select({ value: sql<number>`count(*)::int` })
+      .from(this.table as PgTable)
+      .where(where);
+    return row?.value ?? 0;
+  }
+
+  /** Same envelope as ScopedRepository.paginate, so list screens are uniform. */
+  async paginate(
+    opts: Partial<PaginateOptions> = {},
+    where?: SQL,
+  ): Promise<Paginated<T["$inferSelect"]>> {
+    const page = Math.max(1, Math.trunc(opts.page ?? DEFAULT_PAGE));
+    const limit = Math.min(
+      MAX_LIMIT,
+      Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT)),
+    );
+
+    const [rows, total] = await Promise.all([
+      this.database
+        .select()
+        .from(this.table as PgTable)
+        .where(where)
+        .orderBy(this.orderBy(opts.sort, opts.order))
+        .limit(limit)
+        .offset((page - 1) * limit),
+      this.count(where),
+    ]);
+
+    return {
+      data: rows as T["$inferSelect"][],
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
+  }
+
+  /** Resolves `?sort=` against real columns, for the reason ScopedRepository does. */
+  private orderBy(sort?: string, order: "asc" | "desc" = "desc"): SQL {
+    const fallback = this.columns.createdAt ?? this.key;
+    const column = sort && sort in this.columns ? this.columns[sort] : fallback;
+    return order === "asc" ? asc(column) : desc(column);
   }
 }
 
