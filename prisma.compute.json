@@ -1,0 +1,12 @@
+{
+  "app": {
+    "name": "rakesetu-backend",
+    "framework": "express",
+    "entry": "src/index.ts",
+    "httpPort": 3000,
+    "build": {
+      "command": "npm run build",
+      "outputDirectory": "."
+    }
+  }
+}
