@@ -16,6 +16,24 @@ import {
   auditLog,
   refreshTokens,
   aiJobs,
+  stations,
+  sections,
+  chargeableDistances,
+  commodities,
+  wagonTypes,
+  wagons,
+  rakes,
+  rakeCompositions,
+  terminals,
+  embargoes,
+  customers,
+  customerSidings,
+  chargeRules,
+  documents,
+  rakeEvents,
+  rakeEventKeys,
+  rakeStates,
+  rakeCycles,
 } from "../schema";
 
 /**
@@ -32,6 +50,28 @@ const schema = {
   auditLog,
   refreshTokens,
   aiJobs,
+
+  // Phase 3 — master data, network and documents.
+  stations,
+  sections,
+  chargeableDistances,
+  commodities,
+  wagonTypes,
+  wagons,
+  rakes,
+  rakeCompositions,
+  terminals,
+  embargoes,
+  customers,
+  customerSidings,
+  chargeRules,
+  documents,
+
+  // Phase 4 — the event spine.
+  rakeEvents,
+  rakeEventKeys,
+  rakeStates,
+  rakeCycles,
 };
 
 const pool = new Pool({

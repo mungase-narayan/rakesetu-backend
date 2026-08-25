@@ -81,11 +81,35 @@ export const idempotent = (options: IdempotencyOptions = {}) => {
       const orgId = req.tenant?.orgId ?? req.user?.orgId ?? "anonymous";
       const key = buildKey(orgId, req.method, req.path, clientKey);
 
-      const claimed = await cache.setIfAbsent<IdempotencyRecord>(
-        key,
-        { status: "in_flight" },
-        ttlSeconds,
-      );
+      /**
+       * **Fails open when Redis is unreachable.**
+       *
+       * Redis is the *fast* half of idempotency and it is explicitly degradable
+       * (see database/redis.ts). The durable half is a uniquely-indexed key
+       * column in Postgres — `rake_event_keys` for the event spine — and that
+       * is what actually stops a retried siding submission from double-counting
+       * detention hours. Refusing every write because a cache is down would
+       * convert a degraded mode into an outage, and it would do so on exactly
+       * the routes an operator most needs during an incident.
+       *
+       * Logged at error, not swallowed quietly: "the replay guard is running on
+       * the database alone" is something monitoring should say out loud.
+       */
+      let claimed: boolean;
+      try {
+        claimed = await cache.setIfAbsent<IdempotencyRecord>(
+          key,
+          { status: "in_flight" },
+          ttlSeconds,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(
+          `IDEMPOTENCY_CACHE_UNAVAILABLE ${req.method} ${req.path} — ${message}; falling through to the durable key`,
+        );
+        next();
+        return;
+      }
 
       if (!claimed) {
         const existing = await cache.get<IdempotencyRecord>(key);

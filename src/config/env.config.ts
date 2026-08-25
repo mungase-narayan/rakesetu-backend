@@ -127,6 +127,27 @@ const env: EnvConfig = {
     retryBaseMs: getNumber("EMAIL_RETRY_BASE_MS", 1000),
   },
 
+  storage: {
+    region: getOptional("S3_REGION", "ap-south-1"),
+    // Defaults are MinIO's stock credentials — usable out of the box for local
+    // development, and obviously wrong anywhere else, which is the point.
+    accessKeyId: getOptional("S3_ACCESS_KEY_ID", "minioadmin"),
+    secretAccessKey: getOptional("S3_SECRET_ACCESS_KEY", "minioadmin"),
+    privateBucket: getOptional("S3_PRIVATE_BUCKET", "rakesetu"),
+    publicBucket: getOptional("S3_PUBLIC_BUCKET", "rakesetu-public"),
+    /**
+     * Empty selects real AWS S3. The default points at the MinIO in
+     * docker-compose, which publishes on :9100 rather than :9000 — the same
+     * port-shifting every other service here uses so two projects can run at
+     * once. The API talks to one client either way.
+     */
+    endpoint: getOptional("S3_ENDPOINT", "http://localhost:9100"),
+    // MinIO only understands path-style addressing; AWS accepts it too.
+    forcePathStyle: getBoolean("S3_FORCE_PATH_STYLE", true),
+    downloadUrlTtlSeconds: getNumber("S3_DOWNLOAD_URL_TTL_SECONDS", 15 * 60),
+    maxUploadBytes: getNumber("S3_MAX_UPLOAD_BYTES", 50 * 1024 * 1024),
+  },
+
   tokens: {
     /**
      * Seven days for an invitation: it is sent to somebody who may be on leave,

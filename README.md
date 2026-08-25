@@ -22,8 +22,21 @@ permission union on `/users/me` so the SPA can gate its own UI from the same map
 the server enforces. `GET /audit` gained a `correlationId` filter, which is what
 turns "something changed" into "here is the whole of what that one click did".
 
-The freight domain (indents, rakes, solver, charges, RAG) is designed but not yet
-built — that starts at Phase 3.
+**Phase 3 — master data, the network and documents.** Fourteen tables of
+reference data with the tenancy line drawn deliberately across them: the rail
+network, wagon types, commodities and the charge rule book are **global** and go
+through `UnscopedRepository`; terminals, wagons, rakes, customers and embargoes
+belong to a zone and go through `ScopedRepository`. With them come the two
+distance functions (`tariffKm` looks up and refuses to guess; `operationalKm` is
+Dijkstra over the sections), the `asOf` charge-rule resolver that has no
+"current" shorthand, the versioned rake composition and the `getRakeConstraints`
+read that is genuinely as-of, an embargo scope contract shared with the matcher
+Phase 7 will write, and private object storage on S3/MinIO with fifteen-minute
+presigned URLs that are never persisted. `npm run db:seed` loads the network the
+rest of the product simulates against.
+
+The freight domain proper (indents, the event spine, the solver, charges, RAG)
+is designed but not yet built — that starts at Phase 4.
 
 ### The two load-bearing pieces
 
@@ -65,8 +78,11 @@ cp .env.example .env
 #    …then edit DB credentials and JWT secrets if yours differ
 
 # 3. Infrastructure
-docker compose up -d postgres redis rabbitmq mailpit
+docker compose up -d postgres redis rabbitmq mailpit minio
 #    Postgres :55433 (pgvector/pgvector:pg16) · Redis :6379 · broker :5674
+#    MinIO :9100, console :9101 (minioadmin/minioadmin) — the `minio-init`
+#    one-shot creates both buckets; without it the first upload is a NoSuchBucket
+#    that reads like a credentials problem and is not.
 #    .env.example already points at these. A local Postgres on :5432 works for
 #    scratch work but has no pgvector, so it is not what the project targets.
 #    No broker at hand? set USE_RABBITMQ_SERVICE=false and jobs run inline.
@@ -74,8 +90,34 @@ docker compose up -d postgres redis rabbitmq mailpit
 # 4. Migrate + seed (seed is mandatory — there is no public signup)
 npm run db:migrate
 npm run db:seed
+#    …loads the rail network too: ~59 stations, 116 directed sections, 12
+#    terminals, 40 rakes, 25 customers and 30 charge rules — plus a short event
+#    ladder per rake, so the map has something to draw before the simulator has
+#    ever run and `POST /reproject` is honest on a fresh database.
+#    `-- --master-only` reloads reference data and leaves accounts alone.
 
-# 5. Run
+# 5. Partitions for `rake_events` (this month + the next three)
+npm run db:partitions
+#    Idempotent. Belongs in a monthly cron; nothing breaks the day it is
+#    forgotten, because a DEFAULT partition catches out-of-range rows — but the
+#    script reports anything that lands there, and a default partition quietly
+#    collecting a month of events is a table scan hiding inside every query.
+
+# 6. Replay a month of freight movement — THE STANDARD DEMO COMMAND
+npm run simulate -- --days 30 --speed 100 --seed 42
+#    ~21,000 events in a few minutes. `--seed 42` twice produces an identical
+#    stream on every machine, which is what makes "the solver skipped R-4412" a
+#    sentence that means the same thing in two places.
+#
+#    --dry-run  generate and count, write nothing
+#    --live     after backfilling, keep emitting against a compressed clock so
+#               the map at /app/controller/network visibly moves
+#
+#    It supersedes the placeholder event ladder `db:seed` writes (source_ref =
+#    'seed'), and resumes from — never rewrites — anything a person or an
+#    earlier run recorded.
+
+# 7. Run
 npm run dev
 ```
 
@@ -181,6 +223,36 @@ tenant proves nothing — and the assertion that actually matters is that an
 | GET    | `/api/v1/roles`                                             | JWT + `user:read`                                                                                                                  |
 | GET    | `/api/v1/audit`                                             | JWT + `audit:read`, tenant-scoped, paginated; filters `entityType`, `entityId`, `actorId`, `action`, `correlationId`, `from`, `to` |
 | GET    | `/api/v1/audit/:entityType/:entityId`                       | JWT + `audit:read`, one entity's full trail                                                                                        |
+| GET/POST | `/api/v1/network/stations` · PATCH `…/:code`              | `masterdata:read` / `masterdata:write`; filters `search`, `division`, `zone`                                                        |
+| GET/POST | `/api/v1/network/sections` · PATCH/DELETE `…/:id`         | POST takes one section **or an array**; every write busts the cached graph                                                          |
+| GET/POST | `/api/v1/network/chargeable-distances`                    | bulk POST — a tariff table arrives as a table                                                                                       |
+| GET    | `/api/v1/network/distance?from=&to=&basis=`                 | `basis` is **required**: `tariff` looks up and **422s when absent**, `operational` runs Dijkstra and returns the path               |
+| GET/POST/PATCH | `/api/v1/commodities` · `…/:code`                   | `class` and `minWeightCondition` are required — the rating engine reads both                                                       |
+| GET/POST/PATCH | `/api/v1/wagon-types` · `…/:code`                   | global catalogue                                                                                                                   |
+| GET/POST/PATCH | `/api/v1/wagons` · `…/:id`                          | tenant-scoped; filters `status`, `typeCode`, `pohDueBefore`                                                                        |
+| GET/POST/PATCH | `/api/v1/rakes` · `…/:id`                           | filters `state`, `station`, `wagonType`, `division`                                                                                |
+| GET    | `/api/v1/rakes/:id/composition?at=<iso>`                    | the composition valid **at that instant**, plus `getRakeConstraints`                                                               |
+| PUT    | `/api/v1/rakes/:id/composition`                             | replaces it — closes the open rows and opens new ones at the same timestamp                                                        |
+| GET/POST/PATCH | `/api/v1/terminals` · `…/:id`                       | `masterdata:write`; filters `type`, `stationCode`, `commodityGroup`                                                                |
+| GET/POST/PATCH/DELETE | `/api/v1/embargoes` · `…/:id`                | **`embargo:write`** — the controller's, not the admin's. DELETE ends it; the row stays                                             |
+| POST   | `/api/v1/embargoes/preview`                                 | the plain-English reading of a scope, from the module that matches it                                                              |
+| GET/POST/PATCH | `/api/v1/customers` · `…/:id`                       | tenant-scoped on the **zone**; `customer_org_id` is the portal tenant (D7)                                                         |
+| GET/POST/DELETE | `/api/v1/customers/:id/sidings` · `…/:sidingId`    | which terminals a customer may load at, and what they may load                                                                     |
+| GET/POST/PATCH | `/api/v1/charge-rules` · `…/:id`                    | filters `type`, `effectiveAt` — the date predicate is SQL                                                                          |
+| GET    | `/api/v1/charge-rules/resolve?type=&asOf=&…`                | the winning rule **and every rule that lost, with a reason**. `asOf` is required                                                    |
+| POST   | `/api/v1/documents/upload`                                  | multipart, 50 MB cap; duplicate content in one org is a 409                                                                        |
+| GET    | `/api/v1/documents`                                         | filters `type`, `isCorpus`, `search`                                                                                               |
+| GET    | `/api/v1/documents/:id/download-url`                        | a 15-minute presigned URL, minted per request and **never stored**                                                                 |
+| DELETE | `/api/v1/documents/:id`                                     | soft — `is_active=false`; the stored object is retained                                                                            |
+| POST   | `/api/v1/rakes/:rakeId/events`                              | JWT + `rake:event:create` + `Idempotency-Key` — 201 with the new projection; **409** naming the from-state, the event and the legal set    |
+| POST   | `/api/v1/rakes/:rakeId/events/bulk`                         | JWT + `rake:event:create` — all-or-nothing; each element carries its own key                                                              |
+| GET    | `/api/v1/rakes/:rakeId/events`                              | JWT + `rake:read` — `occurred_at` order; `from`, `to`, `eventType`, `includeRejected`                                                     |
+| GET    | `/api/v1/rakes/:rakeId/state`                               | JWT + `rake:read` — the current projection; 404 when the rake has no events                                                               |
+| GET    | `/api/v1/rakes/:rakeId/cycles` · `/cycles/:cycleId`         | JWT + `rake:read`                                                                                                                        |
+| POST   | `/api/v1/rakes/:rakeId/reproject`                           | JWT + `admin` — §13.2's determinism check; `{ changed: false }` is the healthy answer                                                     |
+| GET    | `/api/v1/network/live`                                      | JWT + `rake:read` + an operating role — the map feed, tenant-scoped, `Cache-Control: no-store`                                            |
+| GET    | `/api/v1/network/rake-states` · `/available-count`          | JWT + `rake:read` + an operating role                                                                                                    |
+| GET    | `/api/v1/anomalies`                                         | JWT + `rake:read` + an operating role — refused events, kept as evidence                                                                  |
 
 List endpoints return a fixed envelope inside `data`:
 
@@ -478,7 +550,10 @@ It listens on its own exclusive queue, so it gives the same answer whether or no
 | `npm run db:migrate`              | Apply pending migrations                                                  |
 | `npm run db:push`                 | Push the schema straight to the DB (dev only)                             |
 | `npm run db:studio`               | Open Drizzle Studio                                                       |
-| `npm run db:seed`                 | Seed organizations, roles and users                                       |
+| `npm run db:seed`                 | Seed tenancy **and** the master data the rest of the product reads        |
+| `npm run db:seed -- --reset`      | Clear first. `--master-only` skips organizations, roles and users         |
+| `npm run db:partitions`           | Create the next three months' `rake_events` partitions (idempotent; cron) |
+| `npm run simulate`                | Replay freight movement into the event spine — see the quick start        |
 | `npm run queue:check`             | RabbitMQ round-trip check (publish → consume)                             |
 
 ## Project structure

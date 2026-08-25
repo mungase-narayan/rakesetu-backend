@@ -77,6 +77,39 @@ export interface RateLimitConfig {
 }
 
 /**
+ * Object storage — S3 in a deployed environment, MinIO in development.
+ *
+ * `endpoint` and `forcePathStyle` are the two fields that make one client serve
+ * both. AWS is reached on its own hostnames with virtual-host addressing;
+ * MinIO is reached at `http://localhost:9000` and only understands
+ * `http://host/bucket/key`. Leaving `endpoint` empty selects real S3.
+ */
+export interface StorageConfig {
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** Documents, evidence, everything §8 calls private. Never world-readable. */
+  privateBucket: string;
+  /**
+   * Assets that are legitimately public. Separate from the private bucket
+   * because a single bucket with per-object ACLs is one wrong default away
+   * from publishing a customer's waiver evidence.
+   */
+  publicBucket: string;
+  /** Empty for real AWS; `http://localhost:9000` for MinIO. */
+  endpoint: string;
+  forcePathStyle: boolean;
+  /**
+   * How long a download URL lives. §8 says short-lived, and 15 minutes is the
+   * number: long enough to click, short enough that a URL pasted into a chat
+   * is dead before it is read.
+   */
+  downloadUrlTtlSeconds: number;
+  /** Upload ceiling, in bytes. Enforced by multer before anything is buffered. */
+  maxUploadBytes: number;
+}
+
+/**
  * SMTP, and the deliberate decision to make all of it optional.
  *
  * `enabled` is derived from whether a host was configured, not from a separate
@@ -124,6 +157,7 @@ export interface EnvConfig {
   redis: RedisConfig;
   rateLimit: RateLimitConfig;
   mail: MailConfig;
+  storage: StorageConfig;
   /** How long a link stays good, in hours. */
   tokens: {
     invitationTtlHours: number;
